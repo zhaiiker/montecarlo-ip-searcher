@@ -51,6 +51,12 @@ type TopResult struct {
 	ScoreMS   float64           `json:"score_ms"`
 	Trace     map[string]string `json:"trace,omitempty"`
 
+	DownloadOK    bool    `json:"download_ok"`
+	DownloadBytes int64   `json:"download_bytes"`
+	DownloadMS    int64   `json:"download_ms"`
+	DownloadMbps  float64 `json:"download_mbps"`
+	DownloadError string  `json:"download_error,omitempty"`
+
 	PrefixSamples int `json:"prefix_samples"`
 	PrefixOK      int `json:"prefix_ok"`
 	PrefixFail    int `json:"prefix_fail"`
