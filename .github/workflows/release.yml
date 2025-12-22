@@ -12,8 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-      goos: [linux, windows, darwin]
-      goarch: [amd64, arm64]
+        goos: [linux, windows, darwin]
+        goarch: [amd64, arm64]
     steps:
     - uses: actions/checkout@v4
     - uses: wangyoucao577/go-release-action@v1
