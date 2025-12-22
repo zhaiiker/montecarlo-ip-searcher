@@ -266,10 +266,7 @@ func Run(ctx context.Context, cfg Config, req Request) (Response, error) {
 	for totalSubmitted < cfg.Budget && totalSubmitted < cfg.Concurrency*2 {
 		h := totalSubmitted % cfg.Heads
 		p := chooseArm(h, totalCompleted)
-		ip := cidr.RandomAddr(p, rngs[h])
-		if _, loaded := seenIPs.LoadOrStore(ip.String(), struct{}{}); loaded {
-			continue
-		}
+		ip := sampleAddrWithDedup(p, rngs[h], seenIPs, 32)
 		tasks <- probeTask{head: h, pfx: p, ip: ip}
 		totalSubmitted++
 	}
@@ -331,10 +328,7 @@ func Run(ctx context.Context, cfg Config, req Request) (Response, error) {
 			if totalSubmitted < cfg.Budget {
 				h := totalSubmitted % cfg.Heads
 				p := chooseArm(h, totalCompleted)
-				ip := cidr.RandomAddr(p, rngs[h])
-				if _, loaded := seenIPs.LoadOrStore(ip.String(), struct{}{}); loaded {
-					break
-				}
+				ip := sampleAddrWithDedup(p, rngs[h], seenIPs, 32)
 				tasks <- probeTask{head: h, pfx: p, ip: ip}
 				totalSubmitted++
 			}
@@ -354,6 +348,37 @@ func Run(ctx context.Context, cfg Config, req Request) (Response, error) {
 	close(done)
 
 	return Response{Top: top.Snapshot()}, nil
+}
+
+func sampleAddrWithDedup(p netip.Prefix, r *mrand.Rand, seen *sync.Map, maxTry int) netip.Addr {
+	p = p.Masked()
+	if maxTry <= 0 {
+		maxTry = 1
+	}
+	// If there are no host bits (/32 or /128), the prefix contains exactly one address.
+	// Dedup would otherwise cause infinite retries and potential scheduler stall.
+	if prefixHostBits(p) <= 0 {
+		return p.Addr()
+	}
+
+	var last netip.Addr
+	for i := 0; i < maxTry; i++ {
+		ip := cidr.RandomAddr(p, r)
+		last = ip
+		if _, loaded := seen.LoadOrStore(ip.String(), struct{}{}); !loaded {
+			return ip
+		}
+	}
+	// Too many duplicates: return the last sampled IP even if seen before.
+	// This guarantees we keep feeding workers and never stall.
+	return last
+}
+
+func prefixHostBits(p netip.Prefix) int {
+	if p.Addr().Is4() {
+		return 32 - p.Bits()
+	}
+	return 128 - p.Bits()
 }
 
 func loadPrefixes(req Request) ([]netip.Prefix, error) {
