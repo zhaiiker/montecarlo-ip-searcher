@@ -127,7 +127,7 @@ go build -o mcis.exe .\cmd\mcis
 
 包含常用字段列，适合直接导入表格分析。
 
-## 参数详解（常用）
+## 参数详解
 
 - `--cidr`：输入 CIDR（可重复）
 - `--cidr-file`：从文件读取 CIDR
@@ -149,12 +149,12 @@ go build -o mcis.exe .\cmd\mcis
 - `--seed`：随机种子（0 表示使用时间种子）
 - `-v`：输出进度到 stderr
 
-## 下载速度测试（search 后对 Top IP）
+### 下载速度测试参数（对前几名 IP 测速）
 
 搜索结束后，可对排名靠前的 IP 进行**下载速度测试**（默认 URL：`https://speed.cloudflare.com/__down?bytes=50000000`）。
 
-- `--download-top`：对 Top N 进行测速（默认 5，设为 0 关闭）
-- `--download-bytes`：下载大小（默认 50000000）
+- `--download-top`：对 Top N IP 进行测速（默认 5，设为 0 关闭）
+- `--download-bytes`：下载大小（默认 50000000 字节）
 - `--download-timeout`：单个 IP 下载测速超时（默认 45s）
 
 提示：
