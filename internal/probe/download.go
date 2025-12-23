@@ -128,19 +128,27 @@ func (p *DownloadProber) Download(ctx context.Context, ip netip.Addr) DownloadRe
 
 	// Read exactly cfg.Bytes or until EOF, whichever comes first.
 	n, err := io.CopyN(io.Discard, resp.Body, p.cfg.Bytes)
-	if err != nil && !errors.Is(err, io.EOF) {
-		out.Error = err.Error()
-		out.TotalMS = time.Since(start).Milliseconds()
-		return out
-	}
-
+	// Always record partial progress, even if the copy fails (e.g. timeout mid-stream).
 	elapsed := time.Since(start)
 	out.TotalMS = elapsed.Milliseconds()
+	out.Bytes = n
 	// bits per second -> Mbps (10^6)
 	if elapsed > 0 {
 		out.Mbps = (float64(n) * 8) / elapsed.Seconds() / 1e6
 	}
+
+	if err != nil && !errors.Is(err, io.EOF) {
+		// Normalize common timeout/cancel signals so output is stable.
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			out.Error = "timeout"
+		} else if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+			out.Error = "canceled"
+		} else {
+			out.Error = err.Error()
+		}
+		return out
+	}
+
 	out.OK = true
-	out.Bytes = n
 	return out
 }
