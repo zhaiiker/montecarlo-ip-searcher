@@ -6,7 +6,19 @@ v0.2.0 采用贝叶斯优化算法，自动平衡"探索"与"利用"，无需手
 
 示例优选域名：`hao.haohaohao.xyz`
 
-IPv4 和 IPv6 的推荐命令分别为
+[Release](https://github.com/Leo-Mu/montecarlo-ip-searcher/releases/latest) 下载解压后在文件夹中右键打开终端。
+
+IPv4 和 IPv6 的命令分别为：
+
+```bash
+./mcis -v --out text --cidr-file ./ipv4cidr.txt
+```
+
+```bash
+./mcis -v --out text --cidr-file ./ipv6cidr.txt
+```
+
+从源码运行：
 
 ```bash
 go run ./cmd/mcis -v --out text --cidr-file ./ipv4cidr.txt
@@ -14,16 +26,6 @@ go run ./cmd/mcis -v --out text --cidr-file ./ipv4cidr.txt
 
 ```bash
 go run ./cmd/mcis -v --out text --cidr-file ./ipv6cidr.txt
-```
-
-[Release](https://github.com/Leo-Mu/montecarlo-ip-searcher/releases/latest) 用户下载解压后在文件夹中右键打开终端，并将程序拖入终端，加入参数即可。
-
-```bash
--v --out text --cidr-file ./ipv4cidr.txt
-```
-
-```bash
--v --out text --cidr-file ./ipv6cidr.txt
 ```
 
 注意，本项目使用的是 https 真返回测速，所以显示延迟会是其它工具的结果加上一个固定值，使用起来是一样的。使用你的网站作为 `--host`（同时用于 SNI 和 Host header），可以保证优选出来的 ip 当前在你的区域一定对你的网站生效，如有特殊需求还可自定义 path。
@@ -40,6 +42,7 @@ go run ./cmd/mcis -v --out text --cidr-file ./ipv6cidr.txt
 - **强制直连探测**：即使系统/环境变量配置了代理，本工具也会**忽略 `HTTP_PROXY/HTTPS_PROXY/NO_PROXY`**，确保测速不被代理污染。
 - **探测方式**：默认对 `https://example.com/cdn-cgi/trace` 发起请求，域名可用 `--host` 覆盖，也可分别用 `--sni` / `--host-header` 覆盖 tls sni 和 http Host header ；路径可使用 `--path` 覆盖。
 - **输出格式**：支持 `jsonl` / `csv` / `text`。
+- **DNS 上传功能**：搜索和测速完成后，可将优选 IP 自动上传到 DNS 服务商（支持 Cloudflare 和 Vercel），作为同一子域名的多条 A/AAAA 记录，实现自动化部署。
 
 ## 快速开始
 
