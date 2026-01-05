@@ -53,6 +53,8 @@ func main() {
 		maxBitsV6 int
 		seed      int64
 		verbose   bool
+		interval  time.Duration
+		maxRuns   int
 
 		// DNS upload flags
 		dnsProvider    string
@@ -91,6 +93,8 @@ func main() {
 	flag.IntVar(&maxBitsV6, "max-bits-v6", 56, "Maximum IPv6 prefix bits to drill down to")
 	flag.Int64Var(&seed, "seed", 0, "Random seed (0 = time-based)")
 	flag.BoolVar(&verbose, "v", false, "Verbose progress to stderr")
+	flag.DurationVar(&interval, "interval", 0, "Run periodically at this interval (0 = run once)")
+	flag.IntVar(&maxRuns, "max-runs", 0, "Maximum number of runs when --interval is set (0 = unlimited)")
 
 	// DNS upload flags
 	flag.StringVar(&dnsProvider, "dns-provider", "", "DNS provider for uploading results (cloudflare|vercel)")
@@ -117,191 +121,217 @@ func main() {
 		hostHdr = host
 	}
 
-	// Build engine config
-	cfg := engine.Config{
-		Budget:          budget,
-		TopN:            topN,
-		Concurrency:     concur,
-		Heads:           heads,
-		Beam:            beam,
-		SplitStepV4:     splitV4,
-		SplitStepV6:     splitV6,
-		MinSamplesSplit: minSplit,
-		MaxBitsV4:       maxBitsV4,
-		MaxBitsV6:       maxBitsV6,
-		Seed:            seed,
-		Verbose:         verbose,
-		DiversityWeight: diversityWeight,
-		SplitInterval:   splitInterval,
-	}
-
-	probeCfg := probe.Config{
-		Timeout:    timeout,
-		SNI:        sni,
-		HostHeader: hostHdr,
-		Path:       path,
-	}
-
-	req := engine.Request{
-		CIDRs:    []string(cidrs),
-		CIDRFile: cidrFile,
-		Probe:    probeCfg,
-	}
-
-	// Create and run engine
-	eng := engine.New(cfg, probeCfg)
-	res, err := eng.Run(ctx, req)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
-	}
-
-	// Download speed test
-	if dlTop < 0 {
-		dlTop = 0
-	}
-	if dlTop > 0 && dlBytes > 0 {
-		if dlTop > len(res.Top) {
-			dlTop = len(res.Top)
-		}
-		dlp := probe.NewDownloadProber(probe.DownloadConfig{
-			Timeout:  dlTimeout,
-			Bytes:    dlBytes,
-			SNI:      "speed.cloudflare.com",
-			HostName: "speed.cloudflare.com",
-			Path:     "/__down",
-		})
-		for i := 0; i < dlTop; i++ {
-			r := &res.Top[i]
-			dctx, dcancel := context.WithTimeout(ctx, dlTimeout)
-			dr := dlp.Download(dctx, r.IP)
-			dcancel()
-			r.DownloadOK = dr.OK
-			r.DownloadBytes = dr.Bytes
-			r.DownloadMS = dr.TotalMS
-			r.DownloadMbps = dr.Mbps
-			r.DownloadError = dr.Error
-			if verbose {
-				fmt.Fprintf(os.Stderr, "download: rank=%d ip=%s ok=%v mbps=%.2f ms=%d bytes=%d err=%s\n",
-					i+1, r.IP.String(), dr.OK, dr.Mbps, dr.TotalMS, dr.Bytes, dr.Error)
-			}
-		}
-	}
-
-	// DNS upload
-	if dnsProvider != "" {
-		if dnsSubdomain == "" {
-			fmt.Fprintln(os.Stderr, "error: --dns-subdomain is required when --dns-provider is set")
-			os.Exit(1)
-		}
-		if dlTop <= 0 {
-			fmt.Fprintln(os.Stderr, "error: --download-top must be > 0 when using DNS upload")
-			os.Exit(1)
+	runOnce := func(ctx context.Context, runIndex int) error {
+		if verbose && interval > 0 {
+			fmt.Fprintf(os.Stderr, "run %d start: %s\n", runIndex, time.Now().Format(time.RFC3339))
 		}
 
-		dnsCfg := dns.Config{
-			Provider:    dnsProvider,
-			Token:       dnsToken,
-			Zone:        dnsZone,
-			Subdomain:   dnsSubdomain,
-			UploadCount: dnsUploadCount,
-			TeamID:      dnsTeamID,
+		// Build engine config
+		cfg := engine.Config{
+			Budget:          budget,
+			TopN:            topN,
+			Concurrency:     concur,
+			Heads:           heads,
+			Beam:            beam,
+			SplitStepV4:     splitV4,
+			SplitStepV6:     splitV6,
+			MinSamplesSplit: minSplit,
+			MaxBitsV4:       maxBitsV4,
+			MaxBitsV6:       maxBitsV6,
+			Seed:            seed,
+			Verbose:         verbose,
+			DiversityWeight: diversityWeight,
+			SplitInterval:   splitInterval,
 		}
 
-		provider, err := dns.NewProvider(dnsCfg)
+		probeCfg := probe.Config{
+			Timeout:    timeout,
+			SNI:        sni,
+			HostHeader: hostHdr,
+			Path:       path,
+		}
+
+		req := engine.Request{
+			CIDRs:    []string(cidrs),
+			CIDRFile: cidrFile,
+			Probe:    probeCfg,
+		}
+
+		// Create and run engine
+		eng := engine.New(cfg, probeCfg)
+		res, err := eng.Run(ctx, req)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-			os.Exit(1)
+			return err
 		}
 
-		// Collect IPs from download-tested results only
-		type dlResult struct {
-			IP   netip.Addr
-			Mbps float64
+		// Download speed test
+		runDlTop := dlTop
+		if runDlTop < 0 {
+			runDlTop = 0
 		}
-		var candidates []dlResult
-		for i := 0; i < dlTop && i < len(res.Top); i++ {
-			r := res.Top[i]
-			if r.DownloadOK {
-				candidates = append(candidates, dlResult{IP: r.IP, Mbps: r.DownloadMbps})
+		if runDlTop > 0 && dlBytes > 0 {
+			if runDlTop > len(res.Top) {
+				runDlTop = len(res.Top)
 			}
-		}
-
-		// Sort by download speed (highest first)
-		sort.Slice(candidates, func(i, j int) bool {
-			return candidates[i].Mbps > candidates[j].Mbps
-		})
-
-		// Determine how many IPs to upload
-		uploadN := dnsCfg.UploadCount
-		if uploadN <= 0 {
-			uploadN = dlTop
-		}
-		if uploadN > len(candidates) {
-			uploadN = len(candidates)
-		}
-
-		// Collect IPs to upload
-		var ipsToUpload []netip.Addr
-		for i := 0; i < uploadN; i++ {
-			ipsToUpload = append(ipsToUpload, candidates[i].IP)
-		}
-
-		if len(ipsToUpload) > 0 {
-			if verbose {
-				fmt.Fprintf(os.Stderr, "dns: uploading %d IPs to %s (subdomain: %s), sorted by download speed...\n",
-					len(ipsToUpload), provider.Name(), dnsSubdomain)
-				for i, ip := range ipsToUpload {
-					fmt.Fprintf(os.Stderr, "  %d. %s (%.2f Mbps)\n", i+1, ip.String(), candidates[i].Mbps)
+			dlp := probe.NewDownloadProber(probe.DownloadConfig{
+				Timeout:  dlTimeout,
+				Bytes:    dlBytes,
+				SNI:      "speed.cloudflare.com",
+				HostName: "speed.cloudflare.com",
+				Path:     "/__down",
+			})
+			for i := 0; i < runDlTop; i++ {
+				r := &res.Top[i]
+				dctx, dcancel := context.WithTimeout(ctx, dlTimeout)
+				dr := dlp.Download(dctx, r.IP)
+				dcancel()
+				r.DownloadOK = dr.OK
+				r.DownloadBytes = dr.Bytes
+				r.DownloadMS = dr.TotalMS
+				r.DownloadMbps = dr.Mbps
+				r.DownloadError = dr.Error
+				if verbose {
+					fmt.Fprintf(os.Stderr, "download: rank=%d ip=%s ok=%v mbps=%.2f ms=%d bytes=%d err=%s\n",
+						i+1, r.IP.String(), dr.OK, dr.Mbps, dr.TotalMS, dr.Bytes, dr.Error)
 				}
 			}
-			if err := dns.Upload(ctx, provider, dnsSubdomain, ipsToUpload, verbose); err != nil {
-				fmt.Fprintln(os.Stderr, "dns upload error:", err)
-				os.Exit(1)
+		}
+
+		// DNS upload
+		if dnsProvider != "" {
+			if dnsSubdomain == "" {
+				return fmt.Errorf("--dns-subdomain is required when --dns-provider is set")
 			}
-		} else {
-			if verbose {
+			if runDlTop <= 0 {
+				return fmt.Errorf("--download-top must be > 0 when using DNS upload")
+			}
+
+			dnsCfg := dns.Config{
+				Provider:    dnsProvider,
+				Token:       dnsToken,
+				Zone:        dnsZone,
+				Subdomain:   dnsSubdomain,
+				UploadCount: dnsUploadCount,
+				TeamID:      dnsTeamID,
+			}
+
+			provider, err := dns.NewProvider(dnsCfg)
+			if err != nil {
+				return err
+			}
+
+			// Collect IPs from download-tested results only
+			type dlResult struct {
+				IP   netip.Addr
+				Mbps float64
+			}
+			var candidates []dlResult
+			for i := 0; i < runDlTop && i < len(res.Top); i++ {
+				r := res.Top[i]
+				if r.DownloadOK {
+					candidates = append(candidates, dlResult{IP: r.IP, Mbps: r.DownloadMbps})
+				}
+			}
+
+			// Sort by download speed (highest first)
+			sort.Slice(candidates, func(i, j int) bool {
+				return candidates[i].Mbps > candidates[j].Mbps
+			})
+
+			// Determine how many IPs to upload
+			uploadN := dnsCfg.UploadCount
+			if uploadN <= 0 {
+				uploadN = runDlTop
+			}
+			if uploadN > len(candidates) {
+				uploadN = len(candidates)
+			}
+
+			// Collect IPs to upload
+			var ipsToUpload []netip.Addr
+			for i := 0; i < uploadN; i++ {
+				ipsToUpload = append(ipsToUpload, candidates[i].IP)
+			}
+
+			if len(ipsToUpload) > 0 {
+				if verbose {
+					fmt.Fprintf(os.Stderr, "dns: uploading %d IPs to %s (subdomain: %s), sorted by download speed...\n",
+						len(ipsToUpload), provider.Name(), dnsSubdomain)
+					for i, ip := range ipsToUpload {
+						fmt.Fprintf(os.Stderr, "  %d. %s (%.2f Mbps)\n", i+1, ip.String(), candidates[i].Mbps)
+					}
+				}
+				if err := dns.Upload(ctx, provider, dnsSubdomain, ipsToUpload, verbose); err != nil {
+					return fmt.Errorf("dns upload error: %w", err)
+				}
+			} else if verbose {
 				fmt.Fprintln(os.Stderr, "dns: no successful download-tested IPs to upload")
 			}
 		}
+
+		// Output
+		var w *os.File = os.Stdout
+		if outPath != "" {
+			f, err := os.Create(outPath)
+			if err != nil {
+				return err
+			}
+			defer func() {
+				_ = f.Close()
+			}()
+			w = f
+		}
+
+		switch outFmt {
+		case "jsonl":
+			if err := output.WriteJSONL(w, res.Top); err != nil {
+				return err
+			}
+		case "csv":
+			if err := output.WriteCSV(w, res.Top); err != nil {
+				return err
+			}
+		case "text":
+			if err := output.WriteText(w, res.Top); err != nil {
+				return err
+			}
+		case "debug":
+			enc := json.NewEncoder(w)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(res); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("unknown -out: %s", outFmt)
+		}
+
+		return nil
 	}
 
-	// Output
-	var w *os.File = os.Stdout
-	if outPath != "" {
-		f, err := os.Create(outPath)
-		if err != nil {
+	if interval <= 0 {
+		if err := runOnce(ctx, 1); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
-		defer func() {
-			_ = f.Close()
-		}()
-		w = f
+		return
 	}
 
-	switch outFmt {
-	case "jsonl":
-		if err := output.WriteJSONL(w, res.Top); err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-			os.Exit(1)
+	runIndex := 0
+	for {
+		runIndex++
+		if err := runOnce(ctx, runIndex); err != nil {
+			fmt.Fprintf(os.Stderr, "run %d error: %v\n", runIndex, err)
 		}
-	case "csv":
-		if err := output.WriteCSV(w, res.Top); err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-			os.Exit(1)
+		if maxRuns > 0 && runIndex >= maxRuns {
+			return
 		}
-	case "text":
-		if err := output.WriteText(w, res.Top); err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-			os.Exit(1)
+
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
 		}
-	case "debug":
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		_ = enc.Encode(res)
-	default:
-		fmt.Fprintln(os.Stderr, "error: unknown -out:", outFmt)
-		os.Exit(1)
 	}
 }

@@ -88,6 +88,8 @@ go run ./cmd/mcis -v --out text --cidr-file ./ipv6cidr.txt
 - `--out-file`：输出到文件（默认 stdout）
 - `--seed`：随机种子（0 表示使用时间种子）
 - `-v`：输出进度到 stderr
+- `--interval`：定时循环运行的间隔（如 `30m` / `1h`，默认 0 只运行一次）
+- `--max-runs`：定时模式下最多运行次数（0 表示无限制）
 
 ### 下载速度测试参数（对前几名 IP 测速）
 
@@ -221,6 +223,22 @@ IPv4 + IPv6 混合优选（A 和 AAAA 记录都会更新）：
 
 包含常用字段列，适合直接导入表格分析。
 
+## 定时运行 / 保活
+
+在同一进程内周期性运行（避免 1Panel 里执行一次就退出）：
+
+```bash
+./mcis --cidr-file ./ipv4cidr.txt --dns-provider cloudflare --dns-zone YOUR_ZONE_ID --dns-subdomain cf --dns-token YOUR_API_TOKEN -v --interval 30m
+```
+
+只运行 12 次后退出（例如 6 小时内每 30 分钟一次）：
+
+```bash
+./mcis --cidr-file ./ipv4cidr.txt -v --interval 30m --max-runs 12
+```
+
+如果你用 1Panel 的“进程守护/守护进程”功能，把命令设为带 `--interval` 的版本即可保持持续更新。
+
 ## 代理/直连说明（重要）
 
 本工具探测时**强制直连**：即使你设置了环境变量（如 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`），也不会生效。
@@ -250,6 +268,18 @@ Go 1.25+
 ```bash
 go test ./...
 go build -o mcis ./cmd/mcis
+```
+
+Linux 常用构建（在 Linux 上或交叉编译）：
+
+```bash
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o mcis ./cmd/mcis
+```
+
+ARM64（比如部分服务器）：
+
+```bash
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o mcis ./cmd/mcis
 ```
 
 Windows PowerShell 也可以直接：
