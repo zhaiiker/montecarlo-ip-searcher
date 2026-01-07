@@ -1,3 +1,3 @@
-module github.com/Leo-Mu/montecarlo-ip-searcher
+module github.com/zhaiiker/montecarlo-ip-searcher
 
 go 1.25.5

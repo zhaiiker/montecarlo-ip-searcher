@@ -6,7 +6,7 @@ v0.2.0 采用贝叶斯优化算法，自动平衡"探索"与"利用"，无需手
 
 示例优选域名：`hao.haohaohao.xyz`
 
-[Release](https://github.com/Leo-Mu/montecarlo-ip-searcher/releases/latest) 下载解压后在文件夹中右键打开终端。
+[Release](https://github.com/zhaiiker/montecarlo-ip-searcher/releases/latest) 下载解压后在文件夹中右键打开终端。
 
 IPv4 和 IPv6 的命令分别为：
 
@@ -91,6 +91,14 @@ go run ./cmd/mcis -v --out text --cidr-file ./ipv6cidr.txt
 - `--interval`：定时循环运行的间隔（如 `30m` / `1h`，默认 0 只运行一次）
 - `--max-runs`：定时模式下最多运行次数（0 表示无限制）
 
+### IP 缓存参数
+
+本工具支持将优选 IP 保存到本地缓存，下次扫描时会优先测试缓存中的 IP，然后再进行新的扫描，最终合并结果选出最快的 IP。这样可以避免"越优选越慢"的问题。
+
+- `--cache-file`：缓存文件路径（默认 `.mcis_cache.json`）
+- `--no-cache`：禁用缓存（不读取也不保存缓存）
+- `--cache-count`：缓存中保留的最大 IP 数量（默认 10）
+
 ### 下载速度测试参数（对前几名 IP 测速）
 
 搜索结束后，可对排名靠前的 IP 进行**下载速度测试**（默认 URL：`https://speed.cloudflare.com/__down?bytes=50000000`）。
@@ -171,6 +179,55 @@ IPv4 + IPv6 混合优选（A 和 AAAA 记录都会更新）：
 ```bash
 ./mcis --cidr-file ./ipv4cidr.txt --cidr-file ./ipv6cidr.txt --dns-provider cloudflare --dns-subdomain cf -v
 ```
+
+### 缓存功能示例
+
+缓存功能默认开启，会自动保存优选结果到 `.mcis_cache.json`。
+
+#### 工作流程
+
+1. **首次运行**：进行完整扫描，将最佳 IP 保存到缓存
+2. **后续运行**：
+   - 先测试缓存中的 IP 速度
+   - 再进行新的 IP 扫描
+   - 合并两组结果，选出最快的 IP
+   - 更新缓存
+
+这样即使新扫描出的 IP 比之前慢，也会保留之前缓存的快 IP，避免"越优选越慢"的问题。
+
+#### 使用示例
+
+使用默认缓存：
+
+```bash
+./mcis --cidr-file ./ipv4cidr.txt -v --out text
+```
+
+指定缓存文件路径：
+
+```bash
+./mcis --cidr-file ./ipv4cidr.txt -v --cache-file ./my_cache.json
+```
+
+缓存更多 IP（默认 10 个）：
+
+```bash
+./mcis --cidr-file ./ipv4cidr.txt -v --cache-count 20
+```
+
+禁用缓存（纯扫描模式，每次都从头开始）：
+
+```bash
+./mcis --cidr-file ./ipv4cidr.txt -v --no-cache
+```
+
+结合定时运行（推荐）：
+
+```bash
+./mcis --cidr-file ./ipv4cidr.txt --dns-provider cloudflare --dns-subdomain cf -v --interval 30m
+```
+
+这样每 30 分钟运行一次，每次都会优先测试上次的优选 IP，确保 DNS 记录始终指向最快的 IP。
 
 ## 项目自带网段（bgp.he.net 高可见度）
 

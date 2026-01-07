@@ -10,9 +10,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Leo-Mu/montecarlo-ip-searcher/internal/bandit"
-	"github.com/Leo-Mu/montecarlo-ip-searcher/internal/cidr"
-	"github.com/Leo-Mu/montecarlo-ip-searcher/internal/probe"
+	"github.com/zhaiiker/montecarlo-ip-searcher/internal/bandit"
+	"github.com/zhaiiker/montecarlo-ip-searcher/internal/cidr"
+	"github.com/zhaiiker/montecarlo-ip-searcher/internal/probe"
 )
 
 // Engine is the core search engine using hierarchical Thompson Sampling.

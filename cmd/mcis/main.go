@@ -13,10 +13,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Leo-Mu/montecarlo-ip-searcher/internal/dns"
-	"github.com/Leo-Mu/montecarlo-ip-searcher/internal/engine"
-	"github.com/Leo-Mu/montecarlo-ip-searcher/internal/output"
-	"github.com/Leo-Mu/montecarlo-ip-searcher/internal/probe"
+	"github.com/zhaiiker/montecarlo-ip-searcher/internal/cache"
+	"github.com/zhaiiker/montecarlo-ip-searcher/internal/dns"
+	"github.com/zhaiiker/montecarlo-ip-searcher/internal/engine"
+	"github.com/zhaiiker/montecarlo-ip-searcher/internal/output"
+	"github.com/zhaiiker/montecarlo-ip-searcher/internal/probe"
 )
 
 type repeatStringFlag []string
@@ -67,6 +68,11 @@ func main() {
 		// New engine parameters
 		diversityWeight float64
 		splitInterval   int
+
+		// Cache flags
+		cacheFile    string
+		cacheDisable bool
+		cacheCount   int
 	)
 
 	flag.Var(&cidrs, "cidr", "CIDR to search (repeatable). Example: 1.1.0.0/16 or 2606:4700::/32")
@@ -108,6 +114,11 @@ func main() {
 	flag.Float64Var(&diversityWeight, "diversity-weight", 0.3, "Weight for head diversity (0-1, higher = more exploration)")
 	flag.IntVar(&splitInterval, "split-interval", 20, "Check for split opportunities every N samples")
 
+	// Cache flags
+	flag.StringVar(&cacheFile, "cache-file", ".mcis_cache.json", "Path to cache file for storing optimized IPs")
+	flag.BoolVar(&cacheDisable, "no-cache", false, "Disable cache (don't load or save cached IPs)")
+	flag.IntVar(&cacheCount, "cache-count", 10, "Maximum number of IPs to keep in cache")
+
 	flag.Parse()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -124,6 +135,92 @@ func main() {
 	runOnce := func(ctx context.Context, runIndex int) error {
 		if verbose && interval > 0 {
 			fmt.Fprintf(os.Stderr, "run %d start: %s\n", runIndex, time.Now().Format(time.RFC3339))
+		}
+
+		// Load cache
+		var ipCache *cache.Cache
+		var cachedResults []engine.TopResult
+		if !cacheDisable {
+			var err error
+			ipCache, err = cache.Load(cacheFile)
+			if err != nil {
+				if verbose {
+					fmt.Fprintf(os.Stderr, "cache: failed to load cache: %v\n", err)
+				}
+				ipCache = &cache.Cache{}
+			} else if !ipCache.IsEmpty() && verbose {
+				fmt.Fprintf(os.Stderr, "cache: loaded %d cached IPs, testing them first...\n", ipCache.Len())
+			}
+		}
+
+		// Test cached IPs first
+		if ipCache != nil && !ipCache.IsEmpty() {
+			probeCfg := probe.Config{
+				Timeout:    timeout,
+				SNI:        sni,
+				HostHeader: hostHdr,
+				Path:       path,
+			}
+			prober := probe.NewProber(probeCfg)
+			dlp := probe.NewDownloadProber(probe.DownloadConfig{
+				Timeout:  dlTimeout,
+				Bytes:    dlBytes,
+				SNI:      "speed.cloudflare.com",
+				HostName: "speed.cloudflare.com",
+				Path:     "/__down",
+			})
+
+			for _, cachedIP := range ipCache.IPs {
+				// Probe test
+				pctx, pcancel := context.WithTimeout(ctx, timeout)
+				probeResult := prober.ProbeHTTPTrace(pctx, cachedIP.IP)
+				pcancel()
+
+				if !probeResult.OK {
+					if verbose {
+						fmt.Fprintf(os.Stderr, "cache: ip=%s probe failed: %s\n", cachedIP.IP.String(), probeResult.Error)
+					}
+					continue
+				}
+
+				score := float64(probeResult.TotalMS)
+				result := engine.TopResult{
+					IP:        cachedIP.IP,
+					OK:        probeResult.OK,
+					Status:    probeResult.Status,
+					Error:     probeResult.Error,
+					ConnectMS: probeResult.ConnectMS,
+					TLSMS:     probeResult.TLSMS,
+					TTFBMS:    probeResult.TTFBMS,
+					TotalMS:   probeResult.TotalMS,
+					ScoreMS:   score,
+					Trace:     probeResult.Trace,
+				}
+
+				// Download test for cached IPs
+				if dlTop > 0 && dlBytes > 0 {
+					dctx, dcancel := context.WithTimeout(ctx, dlTimeout)
+					dr := dlp.Download(dctx, cachedIP.IP)
+					dcancel()
+					result.DownloadOK = dr.OK
+					result.DownloadBytes = dr.Bytes
+					result.DownloadMS = dr.TotalMS
+					result.DownloadMbps = dr.Mbps
+					result.DownloadError = dr.Error
+					if verbose {
+						fmt.Fprintf(os.Stderr, "cache: ip=%s probe=%.1fms dl_ok=%v dl_mbps=%.2f\n",
+							cachedIP.IP.String(), score, dr.OK, dr.Mbps)
+					}
+				} else if verbose {
+					fmt.Fprintf(os.Stderr, "cache: ip=%s probe=%.1fms\n", cachedIP.IP.String(), score)
+				}
+
+				cachedResults = append(cachedResults, result)
+			}
+
+			if verbose && len(cachedResults) > 0 {
+				fmt.Fprintf(os.Stderr, "cache: %d/%d cached IPs passed testing\n", len(cachedResults), ipCache.Len())
+			}
 		}
 
 		// Build engine config
@@ -158,6 +255,9 @@ func main() {
 		}
 
 		// Create and run engine
+		if verbose {
+			fmt.Fprintf(os.Stderr, "search: starting new IP search...\n")
+		}
 		eng := engine.New(cfg, probeCfg)
 		res, err := eng.Run(ctx, req)
 		if err != nil {
@@ -194,6 +294,80 @@ func main() {
 					fmt.Fprintf(os.Stderr, "download: rank=%d ip=%s ok=%v mbps=%.2f ms=%d bytes=%d err=%s\n",
 						i+1, r.IP.String(), dr.OK, dr.Mbps, dr.TotalMS, dr.Bytes, dr.Error)
 				}
+			}
+		}
+
+		// Merge cached results with new results
+		allResults := append(cachedResults, res.Top...)
+
+		// Deduplicate by IP, keeping the better result
+		ipMap := make(map[netip.Addr]engine.TopResult)
+		for _, r := range allResults {
+			existing, exists := ipMap[r.IP]
+			if !exists {
+				ipMap[r.IP] = r
+				continue
+			}
+			// Keep the better one (prefer download OK, then higher Mbps, then lower score)
+			if r.DownloadOK && !existing.DownloadOK {
+				ipMap[r.IP] = r
+			} else if r.DownloadOK && existing.DownloadOK && r.DownloadMbps > existing.DownloadMbps {
+				ipMap[r.IP] = r
+			} else if !r.DownloadOK && !existing.DownloadOK && r.ScoreMS < existing.ScoreMS {
+				ipMap[r.IP] = r
+			}
+		}
+
+		// Convert back to slice and sort
+		mergedResults := make([]engine.TopResult, 0, len(ipMap))
+		for _, r := range ipMap {
+			mergedResults = append(mergedResults, r)
+		}
+
+		// Sort by download speed (for those with download test) then by score
+		sort.Slice(mergedResults, func(i, j int) bool {
+			if mergedResults[i].DownloadOK && mergedResults[j].DownloadOK {
+				return mergedResults[i].DownloadMbps > mergedResults[j].DownloadMbps
+			}
+			if mergedResults[i].DownloadOK {
+				return true
+			}
+			if mergedResults[j].DownloadOK {
+				return false
+			}
+			return mergedResults[i].ScoreMS < mergedResults[j].ScoreMS
+		})
+
+		// Keep top N
+		if len(mergedResults) > topN {
+			mergedResults = mergedResults[:topN]
+		}
+		res.Top = mergedResults
+
+		// Update cache with best results
+		if !cacheDisable && ipCache != nil {
+			var newCachedIPs []cache.CachedIP
+			for _, r := range mergedResults {
+				colo := ""
+				if r.Trace != nil {
+					colo = r.Trace["colo"]
+				}
+				newCachedIPs = append(newCachedIPs, cache.CachedIP{
+					IP:           r.IP,
+					ScoreMS:      r.ScoreMS,
+					DownloadMbps: r.DownloadMbps,
+					DownloadOK:   r.DownloadOK,
+					Colo:         colo,
+					LastTested:   time.Now(),
+				})
+			}
+			ipCache.Update(newCachedIPs, cacheCount)
+			if err := ipCache.Save(cacheFile); err != nil {
+				if verbose {
+					fmt.Fprintf(os.Stderr, "cache: failed to save cache: %v\n", err)
+				}
+			} else if verbose {
+				fmt.Fprintf(os.Stderr, "cache: saved %d IPs to %s\n", ipCache.Len(), cacheFile)
 			}
 		}
 

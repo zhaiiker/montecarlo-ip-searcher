@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/Leo-Mu/montecarlo-ip-searcher/internal/engine"
+	"github.com/zhaiiker/montecarlo-ip-searcher/internal/engine"
 )
 
 // WriteJSONL writes results as JSON Lines format.
